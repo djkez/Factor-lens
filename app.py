@@ -242,6 +242,9 @@ def download_monthly_prices(ticker: str, start: date, end: date) -> pd.Series:
     close.index = pd.to_datetime(close.index).tz_localize(None)
     monthly = close.resample("ME").last()
     monthly.name = "Adjusted close"
+    # Keep the true last trading date: resampling labels the current partial month
+    # with its future calendar month-end, which is not a valid date-picker value.
+    monthly.attrs["last_observation_date"] = close.index.max().date()
     return monthly
 
 
@@ -274,25 +277,25 @@ def run_analysis(ticker: str, start: date, end: date, model_name: str, region_ch
 def available_analysis_dates(
     tickers: list[str], model_name: str, region_choice: str
 ) -> tuple[date, date]:
-    """Find the common first and last usable regression dates for the selection."""
+    """Find the earliest usable regression month and latest common price date."""
     starts: list[pd.Period] = []
-    ends: list[pd.Period] = []
+    price_ends: list[date] = []
     factors_used = MODEL_FACTORS[model_name]
     for ticker in tickers:
         region = infer_region(ticker) if region_choice == "Auto-detect" else region_choice
         prices = download_monthly_prices(ticker, date(1900, 1, 1), date.today())
+        price_ends.append(prices.attrs["last_observation_date"])
         return_periods = prices.pct_change().dropna().index.to_period("M")
         factors = get_factors(region, factors_used)
         usable_periods = return_periods.intersection(factors.index)
         if usable_periods.empty:
             raise ValueError(f"No overlapping price and factor data are available for {ticker}.")
         starts.append(usable_periods.min())
-        ends.append(usable_periods.max())
     common_start = max(starts)
-    common_end = min(ends)
-    if common_start > common_end:
+    common_end = min(price_ends)
+    if common_start.start_time.date() > common_end:
         raise ValueError("The selected tickers do not share a common analysis period.")
-    return common_start.start_time.date(), common_end.end_time.date()
+    return common_start.start_time.date(), common_end
 
 
 def coefficient_table(analysis: Analysis) -> pd.DataFrame:
@@ -588,7 +591,11 @@ with st.sidebar:
         "Use latest available end date",
         value=True,
         key="use_latest",
-        help="The analysis will continue through the most recent available data.",
+        help=(
+            "The end date will follow the most recent price observation shared by the "
+            "selected tickers. Regression results use the latest month for which matching "
+            "factor data are also available."
+        ),
     )
     availability_error = None
     selected_tickers = list(dict.fromkeys(
